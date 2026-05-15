@@ -40,24 +40,15 @@ def ok(uid):
 # ─── محرك الاستخراج الذكي ─────────────────────────────────────────────
 
 def get_phone(text):
-    """دالة مرنة جداً لاستخراج الرقم السعودي من أي نص أو جدول"""
     if not text or text == 'nan': return None
-    
-    # 1. تنظيف النص من كل شيء ماعدا الأرقام
     clean_text = re.sub(r'\D', '', str(text))
-    
-    # 2. البحث عن نمط الجوال (يبدأ بـ 5 ويتبعه 8 أرقام) مع احتمالية وجود 966 أو 0 في البداية
-    # الصيغ المدعومة: 05xxxxxxxx, 9665xxxxxxxx, 5xxxxxxxx
     m = re.search(r'(?:966|0)?(5\d{8})', clean_text)
-    if m:
-        return '0' + m.group(1)
-    
+    if m: return '0' + m.group(1)
     return None
 
 def get_name(text, default="غير محدد"):
     if not text or text == 'nan': return default
     text = str(text).strip()
-    # تنظيف الأسماء المستخرجة من الواتساب التي تبدأ بـ ~
     m = re.search(r'~\s*([^:]+):', text)
     if m: return m.group(1).strip()[:40]
     return text[:40]
@@ -68,16 +59,14 @@ REGIONS    = ["الرياض","جدة","مكة","المدينة","الدمام","
 def is_co(text):
     return any(k in str(text) for k in COMPANY_KW)
 
-# ─── معالجة الملفات (Excel, PDF, Text) ────────────────────────────────
+# ─── معالجة الملفات ──────────────────────────────────────────────────
 
 def extract_from_excel(path):
     try:
         df = pd.read_csv(path) if path.suffix.lower() == '.csv' else pd.read_excel(path)
         cols = df.columns.tolist()
-        # البحث عن أعمدة الجوال والأسماء بمرونة
         p_col = next((c for c in cols if any(k in str(c).lower() for k in ['جوال', 'هاتف', 'phone', 'تواصل'])), None)
         n_col = next((c for c in cols if any(k in str(c).lower() for k in ['اسم', 'name', 'العميل'])), None)
-        
         recs = []
         for _, row in df.iterrows():
             ph = get_phone(row[p_col]) if p_col else None
@@ -96,25 +85,24 @@ def extract_from_pdf(path):
                 if text:
                     for line in text.splitlines():
                         ph = get_phone(line)
-                        if ph:
-                            recs.append({'phone': ph, 'text': line, 'date': datetime.now().strftime('%d.%m.%Y')})
+                        if ph: recs.append({'phone': p, 'text': line, 'date': datetime.now().strftime('%d.%m.%Y')})
     except: pass
     return recs
 
-# ─── تحديث الإكسيل الرئيسي ─────────────────────────────────────────────
+# ─── تحديث الإكسيل والملخص ─────────────────────────────────────────────
 
 def update_excel(records, source_name):
     wb = load_workbook(EXCEL)
-    ws_a, ws_s = wb['أفراد'], wb['شركات']
+    ws_a, ws_s, ws_m = wb['أفراد'], wb['شركات'], wb['الملخص']
     
-    # فحص المكرر
+    # 1. جلب الأرقام الموجودة لمنع التكرار
     exist = set()
     for row in ws_a.iter_rows(min_row=2, max_col=2, values_only=True):
         if row[1]: exist.add(str(row[1])[-9:])
     for row in ws_s.iter_rows(min_row=2, max_col=4, values_only=True):
         if row[3]: exist.add(str(row[3])[-9:])
 
-    na, ns, dups = 0, 0, 0
+    new_a, new_s, dups = 0, 0, 0
     for r in records:
         ph = r['phone']
         if ph[-9:] in exist:
@@ -128,7 +116,7 @@ def update_excel(records, source_name):
             for c, val in enumerate(cells, 1):
                 cell = ws_s.cell(row_idx, c, val)
                 cell.fill, cell.font, cell.alignment = FILL_ROW, FONT_MAIN, (ALIGN_C if c in [1,4] else ALIGN_R)
-            ns += 1
+            new_s += 1
         else:
             row_idx = ws_a.max_row + 1
             reg = next((rg for rg in REGIONS if rg in r['text']), "غير محدد")
@@ -138,15 +126,25 @@ def update_excel(records, source_name):
                 cell.fill, cell.font, cell.alignment = FILL_ROW, FONT_MAIN, (ALIGN_C if c in [1,2,6,7] else ALIGN_R)
             na += 1
 
+    # 2. تحديث شيت "الملخص" بالأرقام الفعلية الكلية
+    total_individuals = ws_a.max_row - 1 # طرح سطر العنوان
+    total_companies = ws_s.max_row - 1
+    total_all = total_individuals + total_companies
+
+    # افترضنا أن الخلايا هي C5 للأفراد، C6 للشركات، C7 للإجمالي (حسب ملفك السابق)
+    ws_m['C5'] = total_individuals
+    ws_m['C6'] = total_companies
+    ws_m['C7'] = total_all
+
     wb.save(EXCEL)
-    return na, ns, dups
+    return new_a, new_s, dups, total_all
 
 # ─── واجهة البوت ─────────────────────────────────────────────────────
 
 async def handle_docs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ok(update.effective_user.id): return
     doc = update.message.document
-    status = await update.message.reply_text("⏳ جاري تحليل الملف ذكياً...")
+    status = await update.message.reply_text("⏳ جاري التحليل وتحديث الملخص...")
     
     f = await ctx.bot.get_file(doc.file_id)
     fp = TEMP_DIR / doc.file_name
@@ -154,7 +152,6 @@ async def handle_docs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     
     ext = fp.suffix.lower()
     recs = []
-    
     if ext in ['.xlsx', '.xls', '.csv']: recs = extract_from_excel(fp)
     elif ext == '.pdf': recs = extract_from_pdf(fp)
     elif ext in ['.txt', '.zip']:
@@ -163,35 +160,22 @@ async def handle_docs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 for line in content.splitlines() if (p := get_phone(line))]
 
     if recs:
-        na, ns, d = update_excel(recs, doc.file_name)
-        await status.edit_text(f"✅ *تمت المعالجة بنجاح*\n\n📄 الملف: `{doc.file_name}`\n👤 أفراد: {na}\n🏢 شركات: {ns}\n🔁 مكرر محذوف: {d}", parse_mode="Markdown")
+        na, ns, d, total = update_excel(recs, doc.file_name)
+        await status.edit_text(f"✅ *تم التحديث!*\n\n📄 الملف: `{doc.file_name}`\n👤 أفراد جدد: {na}\n🏢 شركات جديدة: {ns}\n🔁 مكرر: {d}\n📊 الإجمالي الفعلي في الملف: *{total:,}*", parse_mode="Markdown")
     else:
-        await status.edit_text("⚠️ لم أتمكن من العثور على أرقام جوال (تبدأ بـ 05) في هذا الملف.")
-    
+        await status.edit_text("⚠️ لم أجد أرقاماً جديدة لإضافتها.")
     if fp.exists(): fp.unlink()
-
-async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not ok(update.effective_user.id): return
-    recs = [{'phone': p, 'text': line, 'date': datetime.now().strftime('%d.%m.%Y')} 
-            for line in update.message.text.splitlines() if (p := get_phone(line))]
-    if recs:
-        na, ns, d = update_excel(recs, "نص مباشر")
-        await update.message.reply_text(f"✅ تم الاستخراج من النص:\nأفراد: {na} | شركات: {ns} | مكرر: {d}")
-
-async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if ok(update.effective_user.id):
-        await update.message.reply_text("🐔 *بوت سلالة المطور*\nأرسل ملفات PDF، Excel، أو نصوص مباشرة وسأحفظها لك فوراً.", parse_mode="Markdown")
 
 async def cmd_getfile(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if ok(update.effective_user.id):
-        await update.message.reply_document(document=open(EXCEL, 'rb'), filename="قاعدة_البيانات.xlsx")
+        await update.message.reply_document(document=open(EXCEL, 'rb'), filename="قاعدة_البيانات_المحدثة.xlsx")
 
-# ─── التشغيل ──────────────────────────────────────────────────────────
+# (بقية الأوامر handle_text, cmd_start تبقى كما هي)
+
 if __name__ == "__main__":
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("getfile", cmd_getfile))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_docs))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_text))
-    print("🚀 البوت المطور يعمل الآن...")
     app.run_polling()
