@@ -85,7 +85,7 @@ def extract_from_pdf(path):
                 if text:
                     for line in text.splitlines():
                         ph = get_phone(line)
-                        if ph: recs.append({'phone': p, 'text': line, 'date': datetime.now().strftime('%d.%m.%Y')})
+                        if ph: recs.append({'phone': ph, 'text': line, 'date': datetime.now().strftime('%d.%m.%Y')})
     except: pass
     return recs
 
@@ -95,7 +95,6 @@ def update_excel(records, source_name):
     wb = load_workbook(EXCEL)
     ws_a, ws_s, ws_m = wb['أفراد'], wb['شركات'], wb['الملخص']
     
-    # 1. جلب الأرقام الموجودة لمنع التكرار
     exist = set()
     for row in ws_a.iter_rows(min_row=2, max_col=2, values_only=True):
         if row[1]: exist.add(str(row[1])[-9:])
@@ -124,14 +123,13 @@ def update_excel(records, source_name):
             for c, val in enumerate(cells, 1):
                 cell = ws_a.cell(row_idx, c, val)
                 cell.fill, cell.font, cell.alignment = FILL_ROW, FONT_MAIN, (ALIGN_C if c in [1,2,6,7] else ALIGN_R)
-            na += 1
+            new_a += 1
 
-    # 2. تحديث شيت "الملخص" بالأرقام الفعلية الكلية
-    total_individuals = ws_a.max_row - 1 # طرح سطر العنوان
+    # تحديث شيت "الملخص" بالخلايا C5, C6, C7
+    total_individuals = ws_a.max_row - 1
     total_companies = ws_s.max_row - 1
     total_all = total_individuals + total_companies
 
-    # افترضنا أن الخلايا هي C5 للأفراد، C6 للشركات، C7 للإجمالي (حسب ملفك السابق)
     ws_m['C5'] = total_individuals
     ws_m['C6'] = total_companies
     ws_m['C7'] = total_all
@@ -140,6 +138,14 @@ def update_excel(records, source_name):
     return new_a, new_s, dups, total_all
 
 # ─── واجهة البوت ─────────────────────────────────────────────────────
+
+async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if ok(update.effective_user.id):
+        await update.message.reply_text("🐔 *بوت سلالة المطور*\nأرسل ملفات PDF، Excel، أو نصوص مباشرة وسأقوم بتحديث الملخص لك فوراً.", parse_mode="Markdown")
+
+async def cmd_getfile(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if ok(update.effective_user.id):
+        await update.message.reply_document(document=open(EXCEL, 'rb'), filename="قاعدة_البيانات_المحدثة.xlsx")
 
 async def handle_docs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ok(update.effective_user.id): return
@@ -161,21 +167,28 @@ async def handle_docs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if recs:
         na, ns, d, total = update_excel(recs, doc.file_name)
-        await status.edit_text(f"✅ *تم التحديث!*\n\n📄 الملف: `{doc.file_name}`\n👤 أفراد جدد: {na}\n🏢 شركات جديدة: {ns}\n🔁 مكرر: {d}\n📊 الإجمالي الفعلي في الملف: *{total:,}*", parse_mode="Markdown")
+        await status.edit_text(f"✅ *تم التحديث!*\n\n📄 الملف: `{doc.file_name}`\n👤 أفراد جدد: {na}\n🏢 شركات جديدة: {ns}\n🔁 مكرر: {d}\n📊 الإجمالي الكلي الحالي: *{total:,}*", parse_mode="Markdown")
     else:
-        await status.edit_text("⚠️ لم أجد أرقاماً جديدة لإضافتها.")
+        await status.edit_text("⚠️ لم أتمكن من العثور على أرقام جوال جديدة في هذا الملف.")
     if fp.exists(): fp.unlink()
 
-async def cmd_getfile(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if ok(update.effective_user.id):
-        await update.message.reply_document(document=open(EXCEL, 'rb'), filename="قاعدة_البيانات_المحدثة.xlsx")
+async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not ok(update.effective_user.id): return
+    recs = [{'phone': p, 'text': line, 'date': datetime.now().strftime('%d.%m.%Y')} 
+            for line in update.message.text.splitlines() if (p := get_phone(line))]
+    if recs:
+        na, ns, d, total = update_excel(recs, "نص مباشر")
+        await update.message.reply_text(f"✅ تم الاستخراج من النص:\nأفراد: {na} | شركات: {ns} | مكرر: {d}\n📊 الإجمالي الكلي: {total}")
 
-# (بقية الأوامر handle_text, cmd_start تبقى كما هي)
-
+# ─── التشغيل ──────────────────────────────────────────────────────────
 if __name__ == "__main__":
     app = ApplicationBuilder().token(BOT_TOKEN).build()
+    
+    # إضافة المعالجات (تأكد من وجودها جميعاً)
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("getfile", cmd_getfile))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_docs))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_text))
+    
+    print("🚀 البوت يعمل الآن بدون أخطاء...")
     app.run_polling()
