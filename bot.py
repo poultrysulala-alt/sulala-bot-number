@@ -7,7 +7,7 @@ import pandas as pd
 import pdfplumber
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill, Font, Alignment
-from telegram import Update
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
 # ─── الإعدادات ──────────────────────────────────────────────────────────
@@ -27,7 +27,7 @@ FONT_MAIN = Font(name="Arial", size=11, color="212121")
 ALIGN_C   = Alignment(horizontal="center", vertical="center")
 ALIGN_R   = Alignment(horizontal="right",  vertical="center")
 
-# ─── إدارة المستخدمين ──────────────────────────────────────────────────
+# ─── إدارة المستخدمين والقوائم ──────────────────────────────────────────
 def get_users():
     if USERS_FILE.exists():
         try: return json.loads(USERS_FILE.read_text(encoding="utf-8"))
@@ -37,7 +37,15 @@ def get_users():
 def ok(uid):
     return uid in get_users()
 
-# ─── محرك الاستخراج الذكي ─────────────────────────────────────────────
+def get_main_menu():
+    keyboard = [
+        [KeyboardButton("/stats"), KeyboardButton("/getfile")],
+        [KeyboardButton("/duplicates"), KeyboardButton("/users")],
+        [KeyboardButton("/help")]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+# ─── محرك الاستخراج والجرد ─────────────────────────────────────────────
 
 def get_phone(text):
     if not text or text == 'nan': return None
@@ -46,55 +54,17 @@ def get_phone(text):
     if m: return '0' + m.group(1)
     return None
 
-def get_name(text, default="غير محدد"):
-    if not text or text == 'nan': return default
-    text = str(text).strip()
-    m = re.search(r'~\s*([^:]+):', text)
-    if m: return m.group(1).strip()[:40]
-    return text[:40]
-
-COMPANY_KW = ["شركة","مؤسسة","مصنع","توزيع","تسويق","مندوب","مبيعات","وكيل","موزع","مشرف","للتجارة","المحدودة","شركه","مؤسسه"]
-REGIONS    = ["الرياض","جدة","مكة","المدينة","الدمام","الخبر","الخرج","القصيم","بريدة","حائل","تبوك","أبها","نجران","جيزان","الطائف"]
-
 def is_co(text):
-    return any(k in str(text) for k in COMPANY_KW)
+    keywords = ["شركة","مؤسسة","مصنع","توزيع","تسويق","مندوب","مبيعات","وكيل","موزع","مشرف","للتجارة","المحدودة"]
+    return any(k in str(text) for k in keywords)
 
-# ─── معالجة الملفات ──────────────────────────────────────────────────
+# ─── تحديث الإكسيل والملخص (الجرد الشامل) ──────────────────────────────
 
-def extract_from_excel(path):
-    try:
-        df = pd.read_csv(path) if path.suffix.lower() == '.csv' else pd.read_excel(path)
-        cols = df.columns.tolist()
-        p_col = next((c for c in cols if any(k in str(c).lower() for k in ['جوال', 'هاتف', 'phone', 'تواصل'])), None)
-        n_col = next((c for c in cols if any(k in str(c).lower() for k in ['اسم', 'name', 'العميل'])), None)
-        recs = []
-        for _, row in df.iterrows():
-            ph = get_phone(row[p_col]) if p_col else None
-            if ph:
-                nm = get_name(row[n_col]) if n_col else "غير محدد"
-                recs.append({'phone': ph, 'text': f"{nm} : {ph}", 'date': datetime.now().strftime('%d.%m.%Y')})
-        return recs
-    except: return []
-
-def extract_from_pdf(path):
-    recs = []
-    try:
-        with pdfplumber.open(path) as pdf:
-            for page in pdf.pages:
-                text = page.extract_text()
-                if text:
-                    for line in text.splitlines():
-                        ph = get_phone(line)
-                        if ph: recs.append({'phone': ph, 'text': line, 'date': datetime.now().strftime('%d.%m.%Y')})
-    except: pass
-    return recs
-
-# ─── تحديث الإكسيل والملخص ─────────────────────────────────────────────
-
-def update_excel(records, source_name):
+def update_excel(records, source_type):
     wb = load_workbook(EXCEL)
     ws_a, ws_s, ws_m = wb['أفراد'], wb['شركات'], wb['الملخص']
     
+    # منع التكرار
     exist = set()
     for row in ws_a.iter_rows(min_row=2, max_col=2, values_only=True):
         if row[1]: exist.add(str(row[1])[-9:])
@@ -111,84 +81,90 @@ def update_excel(records, source_name):
         exist.add(ph[-9:])
         if is_co(r['text']):
             row_idx = ws_s.max_row + 1
-            cells = [row_idx - 1, get_name(r['text']), "مستخرج", ph]
-            for c, val in enumerate(cells, 1):
-                cell = ws_s.cell(row_idx, c, val)
-                cell.fill, cell.font, cell.alignment = FILL_ROW, FONT_MAIN, (ALIGN_C if c in [1,4] else ALIGN_R)
+            ws_s.append([row_idx - 1, r['text'][:40], "مستخرج", ph])
             new_s += 1
         else:
             row_idx = ws_a.max_row + 1
-            reg = next((rg for rg in REGIONS if rg in r['text']), "غير محدد")
-            cells = [row_idx - 1, ph, get_name(r['text']), "دواجن", reg, "", r['date'], r['text'][:100], source_name[:20]]
-            for c, val in enumerate(cells, 1):
-                cell = ws_a.cell(row_idx, c, val)
-                cell.fill, cell.font, cell.alignment = FILL_ROW, FONT_MAIN, (ALIGN_C if c in [1,2,6,7] else ALIGN_R)
+            ws_a.append([row_idx - 1, ph, r['text'][:40], "دواجن", "غير محدد", "", r['date'], r['text'][:100], source_type])
             new_a += 1
 
-    # تحديث شيت "الملخص" بالخلايا C5, C6, C7
-    total_individuals = ws_a.max_row - 1
-    total_companies = ws_s.max_row - 1
-    total_all = total_individuals + total_companies
+    # الجرد الفعلي للملف كامل
+    total_a = ws_a.max_row - 1
+    total_s = ws_s.max_row - 1
+    total_all = total_a + total_s
 
-    ws_m['C5'] = total_individuals
-    ws_m['C6'] = total_companies
+    # تحديث شيت الملخص
+    ws_m['C5'] = total_a
+    ws_m['C6'] = total_s
     ws_m['C7'] = total_all
 
     wb.save(EXCEL)
     return new_a, new_s, dups, total_all
 
-# ─── واجهة البوت ─────────────────────────────────────────────────────
+# ─── معالجة الرسائل والملفات ──────────────────────────────────────────
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if ok(update.effective_user.id):
-        await update.message.reply_text("🐔 *بوت سلالة المطور*\nأرسل ملفات PDF، Excel، أو نصوص مباشرة وسأقوم بتحديث الملخص لك فوراً.", parse_mode="Markdown")
+    if not ok(update.effective_user.id): return
+    msg = (
+        "🐔 *بوت دواجن*\n\n"
+        "أرسل ZIP أو TXT تصدير واتساب، أو ملفات Excel/PDF!\n\n"
+        "استخدم القائمة بالأسفل للتحكم 👇"
+    )
+    await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=get_main_menu())
+
+async def handle_any_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not ok(update.effective_user.id): return
+    
+    source_name = "نص مباشر"
+    raw_text = ""
+
+    if update.message.document:
+        doc = update.message.document
+        source_name = doc.file_name
+        f = await ctx.bot.get_file(doc.file_id)
+        fp = TEMP_DIR / doc.file_name
+        await f.download_to_drive(fp)
+        
+        if fp.suffix.lower() == '.pdf':
+            with pdfplumber.open(fp) as pdf:
+                raw_text = "\n".join([p.extract_text() or "" for p in pdf.pages])
+        else:
+            raw_text = fp.read_text(encoding='utf-8', errors='ignore')
+        fp.unlink()
+    else:
+        raw_text = update.message.text
+
+    recs = [{'phone': p, 'text': line, 'date': datetime.now().strftime('%d.%m.%Y')} 
+            for line in raw_text.splitlines() if (p := get_phone(line))]
+
+    if recs:
+        na, ns, d, total = update_excel(recs, source_name)
+        res = (
+            "✅ *تم الاستخراج بنجاح!*\n\n"
+            f"📝 النوع: {source_name[:20]}\n"
+            f"👤 أفراد: {na} | 🏢 شركات: {ns}\n"
+            f"🔁 مكرر: {d} | 📊 الإجمالي: {total:,}"
+        )
+        await update.message.reply_text(res, parse_mode="Markdown", reply_markup=get_main_menu())
+    else:
+        await update.message.reply_text("⚠️ لم يتم العثور على أرقام جديدة.")
 
 async def cmd_getfile(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if ok(update.effective_user.id):
-        await update.message.reply_document(document=open(EXCEL, 'rb'), filename="قاعدة_البيانات_المحدثة.xlsx")
+        await update.message.reply_document(document=open(EXCEL, 'rb'), caption="📊 قاعدة البيانات المحدثة")
 
-async def handle_docs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not ok(update.effective_user.id): return
-    doc = update.message.document
-    status = await update.message.reply_text("⏳ جاري التحليل وتحديث الملخص...")
-    
-    f = await ctx.bot.get_file(doc.file_id)
-    fp = TEMP_DIR / doc.file_name
-    await f.download_to_drive(fp)
-    
-    ext = fp.suffix.lower()
-    recs = []
-    if ext in ['.xlsx', '.xls', '.csv']: recs = extract_from_excel(fp)
-    elif ext == '.pdf': recs = extract_from_pdf(fp)
-    elif ext in ['.txt', '.zip']:
-        content = fp.read_text(encoding='utf-8', errors='ignore')
-        recs = [{'phone': p, 'text': line, 'date': datetime.now().strftime('%d.%m.%Y')} 
-                for line in content.splitlines() if (p := get_phone(line))]
-
-    if recs:
-        na, ns, d, total = update_excel(recs, doc.file_name)
-        await status.edit_text(f"✅ *تم التحديث!*\n\n📄 الملف: `{doc.file_name}`\n👤 أفراد جدد: {na}\n🏢 شركات جديدة: {ns}\n🔁 مكرر: {d}\n📊 الإجمالي الكلي الحالي: *{total:,}*", parse_mode="Markdown")
-    else:
-        await status.edit_text("⚠️ لم أتمكن من العثور على أرقام جوال جديدة في هذا الملف.")
-    if fp.exists(): fp.unlink()
-
-async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not ok(update.effective_user.id): return
-    recs = [{'phone': p, 'text': line, 'date': datetime.now().strftime('%d.%m.%Y')} 
-            for line in update.message.text.splitlines() if (p := get_phone(line))]
-    if recs:
-        na, ns, d, total = update_excel(recs, "نص مباشر")
-        await update.message.reply_text(f"✅ تم الاستخراج من النص:\nأفراد: {na} | شركات: {ns} | مكرر: {d}\n📊 الإجمالي الكلي: {total}")
+async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if ok(update.effective_user.id):
+        wb = load_workbook(EXCEL)
+        total = (wb['أفراد'].max_row - 1) + (wb['شركات'].max_row - 1)
+        await update.message.reply_text(f"📈 *إحصائيات حالية:*\nالإجمالي في الملف: {total:,} رقم", parse_mode="Markdown")
 
 # ─── التشغيل ──────────────────────────────────────────────────────────
 if __name__ == "__main__":
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-    
-    # إضافة المعالجات (تأكد من وجودها جميعاً)
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("getfile", cmd_getfile))
-    app.add_handler(MessageHandler(filters.Document.ALL, handle_docs))
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_text))
-    
-    print("🚀 البوت يعمل الآن بدون أخطاء...")
+    app.add_handler(CommandHandler("stats", cmd_stats))
+    app.add_handler(MessageHandler(filters.ALL & (~filters.COMMAND), handle_any_input))
+    print("🚀 البوت يعمل بالقائمة الجديدة...")
     app.run_polling()
